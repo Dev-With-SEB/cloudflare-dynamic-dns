@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
+
 # Based on https://gist.github.com/benkulbertis/fff10759c2391b6618dd
+# Originally writen by va1entin
+#     va1entin's [Repo]https://github.com/va1entin/tools/tree/master/cloudflare_update_record
+#     va1entin's [blog post](https://valh.io/p/python-script-for-cloudflare-dns-record-updates-dyndns/) for more information and config instructions.
 
-# See for configuration: https://valh.io/p/python-script-for-cloudflare-dns-record-updates-dyndns/
 
-import argparse
-import logging
 import re
-import requests
 import sys
 import yaml
+import logging
+import argparse
+import requests
+
+__version__ = '0.2.0'
 
 
 log_levels = {'crit': logging.CRITICAL, 'warn': logging.WARN, 'info': logging.INFO, 'debug': logging.DEBUG}
@@ -92,12 +97,22 @@ def check_ip(current_ip_address, version):
 
 def check_config(config, config_file):
     for required_config_key in required_config_keys:
-        if not required_config_key in config:
+        if required_config_key not in config:
             logging.critical(f'Required config key "{required_config_key}" missing in config "{config_file}"! Exiting...')
             sys.exit(1)
-    if config["record_name"].endswith(config["zone_name"]):
-        logging.warning(f'record_name "{config["record_name"]}" in config "{config_file}" contains zone_name "{config["zone_name"]}". This is not necessary and should be removed.')
-        config["record_name"] = re.sub(f'.{config["zone_name"]}', '', config["record_name"])
+
+    # Normalize record_name to a list
+    if isinstance(config["record_name"], str):
+        config["record_name"] = [config["record_name"]]
+    elif not isinstance(config["record_name"], list):
+        logging.critical(f'"record_name" in config must be a string or a list of strings. Got: {type(config["record_name"])}')
+        sys.exit(1)
+
+    for i, record in enumerate(config["record_name"]):
+        if record.endswith(config["zone_name"]):
+            logging.warning(f'record_name "{record}" in config "{config_file}" contains zone_name "{config["zone_name"]}". This is not necessary and should be removed.')
+            config["record_name"][i] = re.sub(f'.{config["zone_name"]}$', '', record)
+
 
 def get_config(config_file):
     try:
@@ -109,32 +124,49 @@ def get_config(config_file):
         logging.critical(f'Could not find config file at {config_file} - exiting...')
         sys.exit(1)
 
-def get_identifiers(config, record_type):
-    request_successful, zone_id_response = make_request('get', f'https://api.cloudflare.com/client/v4/zones?name={config["zone_name"]}', headers={"Authorization": f"Bearer {config['read_token']}", "Content-Type": "application/json"}, exit_on_fail=True)
+
+def get_identifiers(config, record_type, record_name):
+    request_successful, zone_id_response = make_request(
+        'get',
+        f'https://api.cloudflare.com/client/v4/zones?name={config["zone_name"]}',
+        headers={"Authorization": f"Bearer {config['read_token']}", "Content-Type": "application/json"},
+        exit_on_fail=True
+    )
     zone_identifier = zone_id_response.json()['result'][0]['id']
 
-    if config["record_name"] == "@":
-        request_successful, record_id_response = make_request('get', f'https://api.cloudflare.com/client/v4/zones/{zone_identifier}/dns_records?name={config["zone_name"]}&type={record_type}', headers={"Authorization": f"Bearer {config['read_token']}", "Content-Type": "application/json"}, exit_on_fail=True)
-    else:
-        request_successful, record_id_response = make_request('get', f'https://api.cloudflare.com/client/v4/zones/{zone_identifier}/dns_records?name={config["record_name"]}.{config["zone_name"]}&type={record_type}', headers={"Authorization": f"Bearer {config['read_token']}", "Content-Type": "application/json"}, exit_on_fail=True)
+    fqdn = config["zone_name"] if record_name == "@" else f'{record_name}.{config["zone_name"]}'
+    request_successful, record_id_response = make_request(
+        'get',
+        f'https://api.cloudflare.com/client/v4/zones/{zone_identifier}/dns_records?name={fqdn}&type={record_type}',
+        headers={"Authorization": f"Bearer {config['read_token']}", "Content-Type": "application/json"},
+        exit_on_fail=True
+    )
 
     try:
         record_identifier = record_id_response.json()['result'][0]['id']
         record_ip = record_id_response.json()['result'][0]['content']
     except IndexError:
-        logging.exception(f'Could not find id of DNS record. "Results" in API response were empty. Please make sure that the specified DNS record already exists and config {args.config} is correct. Try again after. Dumping exception...')
+        logging.exception(f'Could not find id of DNS record "{fqdn}". Please ensure it exists in Cloudflare. Check config file "{args.config}".')
         sys.exit(1)
+
     return zone_identifier, record_identifier, record_ip
 
 
-def update_record(config, ip, record_type, zone_identifier, record_identifier):
-    request_successful, response = make_request('put', f'https://api.cloudflare.com/client/v4/zones/{zone_identifier}/dns_records/{record_identifier}', headers={"Authorization": f"Bearer {config['edit_token']}", "Content-Type": "application/json"}, data=f'{{"id": "{zone_identifier}", "type": "{record_type}", "name": "{config["record_name"]}","content": "{ip}"}}')
+
+def update_record(config, ip, record_type, zone_identifier, record_identifier, record_name):
+    request_successful, response = make_request(
+        'put',
+        f'https://api.cloudflare.com/client/v4/zones/{zone_identifier}/dns_records/{record_identifier}',
+        headers={"Authorization": f"Bearer {config['edit_token']}", "Content-Type": "application/json"},
+        data=f'{{"id": "{zone_identifier}", "type": "{record_type}", "name": "{record_name}","content": "{ip}"}}'
+    )
 
     if request_successful:
-        logging.info(f'DNS {record_type} record update succeeded, IP changed to: "{ip}"')
+        logging.info(f'DNS {record_type} record "{record_name}" update succeeded. IP changed to: "{ip}"')
     else:
-        logging.critical(f'DNS {record_type} record update failed, dumping API response:\n{response.content}')
+        logging.critical(f'DNS {record_type} record "{record_name}" update failed, dumping API response:\n{response.content}')
         sys.exit(1)
+
 
 
 def write_ip(ip, version):
@@ -145,26 +177,33 @@ def write_ip(ip, version):
 
 def main(ip_version, record_type, args):
     current_ip_address = get_ip(ip_version, args)
-    if current_ip_address:
-        if args.local_cache:
-            ip_different = check_ip(current_ip_address, ip_version)
+    if not current_ip_address:
+        return
+
+    if args.local_cache:
+        ip_different = check_ip(current_ip_address, ip_version)
+    else:
+        ip_different = True
+
+    if not ip_different:
+        logging.info(f'IPv{ip_version} address has not changed. Exiting...')
+        return
+
+    config = get_config(args.config)
+    check_config(config, args.config)
+
+    for record_name in config["record_name"]:
+        zone_identifier, record_identifier, record_ip = get_identifiers(config, record_type, record_name)
+
+        if current_ip_address != record_ip:
+            update_record(config, current_ip_address, record_type, zone_identifier, record_identifier, record_name)
+            write_ip(current_ip_address, ip_version)
+        elif args.force:
+            logging.warning(f'Force parameter is set. Forcing IP address "{current_ip_address}" update for record "{record_name}" even though it matches current record IP.')
+            update_record(config, current_ip_address, record_type, zone_identifier, record_identifier, record_name)
+            write_ip(current_ip_address, ip_version)
         else:
-            ip_different = True
-        if ip_different:
-            config = get_config(args.config)
-            check_config(config, args.config)
-            zone_identifier, record_identifier, record_ip = get_identifiers(config, record_type)
-            if current_ip_address != record_ip:
-                update_record(config, current_ip_address, record_type, zone_identifier, record_identifier)
-                write_ip(current_ip_address, ip_version)
-            elif current_ip_address == record_ip and args.force:
-                logging.warning(f'Force parameter is set. Setting IP address "{current_ip_address}" even though it is equal to IP of DNS record "{config["record_name"]}" in zone "{config["zone_name"]}" already.')
-                update_record(config, current_ip_address, record_type, zone_identifier, record_identifier)
-                write_ip(current_ip_address, ip_version)
-            else:
-                logging.info(f'Current IPv{ip_version} address "{current_ip_address}" is equal to IP of DNS record "{config["record_name"]}" in zone "{config["zone_name"]}" already: "{record_ip}". Exiting...')
-        else:
-            logging.info(f'IPv{ip_version} address has not changed. Exiting...')
+            logging.info(f'IPv{ip_version} address "{current_ip_address}" already matches DNS record "{record_name}". Skipping...')
 
 
 if __name__ == '__main__':

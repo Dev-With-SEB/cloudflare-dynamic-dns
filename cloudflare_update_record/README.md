@@ -4,7 +4,10 @@ Updates a DNS A or AAAA record on Cloudflare with the system's current external 
 
 It obtains the external IPv4/v6 address from a *provider* (default: https://icanhazip.com), sets it for a specified record and finally writes it to a file to check with next time.
 
-See my [blog post](https://valh.io/p/python-script-for-cloudflare-dns-record-updates-dyndns/) for more information and config instructions.
+Originally writen by va1entin
+    va1entin's [Repo]https://github.com/va1entin/tools/tree/master/cloudflare_update_record
+    va1entin's [blog post](https://valh.io/p/python-script-for-cloudflare-dns-record-updates-dyndns/) for more information and config instructions.
+
 
 ## Get usage
 
@@ -32,3 +35,15 @@ edit_token: "<YOUR EDIT TOKEN>"
 zone_name: "<YOUR ZONE NAME>"
 record_name: "<YOUR RECORD NAME>" # use "@" for root record
 ```
+
+### Or
+
+if you have multiple records
+
+```yaml
+read_token: "<YOUR READ TOKEN>"
+edit_token: "<YOUR EDIT TOKEN>"
+zone_name: "<YOUR ZONE NAME>"
+record_name:
+    - "<YOUR RECORD NAME>" # use "@" for root record    record_name: 
+    - "<YOUR 2nd RECORD NAME>"
