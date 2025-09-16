@@ -13,7 +13,7 @@ import logging
 import argparse
 import requests
 
-__version__ = '0.2.0'
+__version__ = '0.3.0'
 
 
 log_levels = {'crit': logging.CRITICAL, 'warn': logging.WARN, 'info': logging.INFO, 'debug': logging.DEBUG}
@@ -95,23 +95,24 @@ def check_ip(current_ip_address, version):
         logging.info(f'Could not find file cloudflare_update_record_ip{version}.txt, continuing...')
         return True
 
-def check_config(config, config_file):
+
+def check_config(zone, config_file):
     for required_config_key in required_config_keys:
-        if required_config_key not in config:
+        if required_config_key not in zone:
             logging.critical(f'Required config key "{required_config_key}" missing in config "{config_file}"! Exiting...')
-            sys.exit(1)
+            sys.exit(1)   
 
     # Normalize record_name to a list
-    if isinstance(config["record_name"], str):
-        config["record_name"] = [config["record_name"]]
-    elif not isinstance(config["record_name"], list):
-        logging.critical(f'"record_name" in config must be a string or a list of strings. Got: {type(config["record_name"])}')
+    if isinstance(zone["record_name"], str):
+        zone["record_name"] = [zone["record_name"]]
+    elif not isinstance(zone["record_name"], list):
+        logging.critical(f'"record_name" in config must be a string or a list of strings. Got: {type(zone["record_name"])}')
         sys.exit(1)
 
-    for i, record in enumerate(config["record_name"]):
-        if record.endswith(config["zone_name"]):
-            logging.warning(f'record_name "{record}" in config "{config_file}" contains zone_name "{config["zone_name"]}". This is not necessary and should be removed.')
-            config["record_name"][i] = re.sub(f'.{config["zone_name"]}$', '', record)
+    for i, record in enumerate(zone["record_name"]):
+        if record.endswith(zone["zone_name"]):
+            logging.warning(f'record_name "{record}" in config "{config_file}" contains zone_name "{zone["zone_name"]}". This is not necessary and should be removed.')
+            zone["record_name"][i] = re.sub(f'.{zone["zone_name"]}$', '', record)
 
 
 def get_config(config_file):
@@ -152,7 +153,6 @@ def get_identifiers(config, record_type, record_name):
     return zone_identifier, record_identifier, record_ip
 
 
-
 def update_record(config, ip, record_type, zone_identifier, record_identifier, record_name):
     request_successful, response = make_request(
         'put',
@@ -168,11 +168,26 @@ def update_record(config, ip, record_type, zone_identifier, record_identifier, r
         sys.exit(1)
 
 
-
 def write_ip(ip, version):
     logging.debug(f'Writing IPv{version} address to file: {ip}')
     with open(f'cloudflare_update_record_ip{version}.txt', 'w', encoding='UTF-8') as f:
         f.write(ip)
+
+
+def handleZone(current_ip_address, ip_version, record_type, config, args):
+    # conf should be called zone
+    for record_name in config["record_name"]:
+        zone_identifier, record_identifier, record_ip = get_identifiers(config, record_type, record_name)
+
+        if current_ip_address != record_ip:
+            update_record(config, current_ip_address, record_type, zone_identifier, record_identifier, record_name)
+            write_ip(current_ip_address, ip_version)
+        elif args.force:
+            logging.warning(f'Force parameter is set. Forcing IP address "{current_ip_address}" update for record "{record_name}" even though it matches current record IP.')
+            update_record(config, current_ip_address, record_type, zone_identifier, record_identifier, record_name)
+            write_ip(current_ip_address, ip_version)
+        else:
+            logging.info(f'IPv{ip_version} address "{current_ip_address}" already matches DNS record "{record_name}". Skipping...')
 
 
 def main(ip_version, record_type, args):
@@ -190,21 +205,18 @@ def main(ip_version, record_type, args):
         return
 
     config = get_config(args.config)
-    check_config(config, args.config)
+    # check_config(config, args.config)
 
-    for record_name in config["record_name"]:
-        zone_identifier, record_identifier, record_ip = get_identifiers(config, record_type, record_name)
-
-        if current_ip_address != record_ip:
-            update_record(config, current_ip_address, record_type, zone_identifier, record_identifier, record_name)
-            write_ip(current_ip_address, ip_version)
-        elif args.force:
-            logging.warning(f'Force parameter is set. Forcing IP address "{current_ip_address}" update for record "{record_name}" even though it matches current record IP.')
-            update_record(config, current_ip_address, record_type, zone_identifier, record_identifier, record_name)
-            write_ip(current_ip_address, ip_version)
-        else:
-            logging.info(f'IPv{ip_version} address "{current_ip_address}" already matches DNS record "{record_name}". Skipping...')
-
+    if 'zones' in config:
+        for zone in config['zones']:
+            logging.info(f'Zone(s): {zone["zone_name"]}')
+            check_config(zone, args.config)
+            handleZone(current_ip_address, ip_version, record_type, zone, args)
+    else:
+        logging.info(f'Zone: {config["zone_name"]}')
+        check_config(config, args.config)
+        handleZone(current_ip_address, ip_version, record_type, config, args)
+    
 
 if __name__ == '__main__':
     args = setup_parser()
