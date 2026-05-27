@@ -9,11 +9,12 @@
 import re
 import sys
 import yaml
+import json
 import logging
 import argparse
 import requests
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'
 
 
 log_levels = {'crit': logging.CRITICAL, 'warn': logging.WARN, 'info': logging.INFO, 'debug': logging.DEBUG}
@@ -136,6 +137,7 @@ def get_identifiers(config, record_type, record_name):
     zone_identifier = zone_id_response.json()['result'][0]['id']
 
     fqdn = config["zone_name"] if record_name == "@" else f'{record_name}.{config["zone_name"]}'
+
     request_successful, record_id_response = make_request(
         'get',
         f'https://api.cloudflare.com/client/v4/zones/{zone_identifier}/dns_records?name={fqdn}&type={record_type}',
@@ -144,21 +146,47 @@ def get_identifiers(config, record_type, record_name):
     )
 
     try:
-        record_identifier = record_id_response.json()['result'][0]['id']
-        record_ip = record_id_response.json()['result'][0]['content']
+        record_result = record_id_response.json()['result'][0]
+        logging.debug(f'record_result: {record_result}')
+        data = {
+            "zone_identifier" : zone_identifier,
+            "record_identifier" : record_result.get("id"),
+            "record_ip" : record_result.get("content"),
+            "ttl": record_result.get("ttl", 1),
+            "proxied": record_result.get("proxied", False),
+            "comment": record_result.get("comment") or "",
+            "tags": record_result.get("tags", [])    
+            }   
     except IndexError:
         logging.exception(f'Could not find id of DNS record "{fqdn}". Please ensure it exists in Cloudflare. Check config file "{args.config}".')
         sys.exit(1)
 
-    return zone_identifier, record_identifier, record_ip
+    return data
 
 
-def update_record(config, ip, record_type, zone_identifier, record_identifier, record_name):
+def update_record(config, ip, record_type, record_name, zone_data):
+    zone_identifier = zone_data["zone_identifier"]
+    record_identifier = zone_data["record_identifier"]
+    payLoad = {
+        "content": ip,
+        "type": record_type, 
+        "name": record_name,
+        "id": zone_identifier, 
+        "ttl": zone_data.get("ttl", 1),
+        "tags": zone_data.get("tags", []), 
+        "proxied": zone_data.get("proxied", False)
+    }
+    comments = zone_data.get("comment")
+    if "" != comments:
+         payLoad["comment"] = comments
+
+    logging.debug(f'payLoad: {payLoad}')
+
     request_successful, response = make_request(
         'put',
         f'https://api.cloudflare.com/client/v4/zones/{zone_identifier}/dns_records/{record_identifier}',
         headers={"Authorization": f"Bearer {config['edit_token']}", "Content-Type": "application/json"},
-        data=f'{{"id": "{zone_identifier}", "type": "{record_type}", "name": "{record_name}","content": "{ip}"}}'
+        data=json.dumps(payLoad)
     )
 
     if request_successful:
@@ -177,14 +205,14 @@ def write_ip(ip, version):
 def handleZone(current_ip_address, ip_version, record_type, config, args):
     # conf should be called zone
     for record_name in config["record_name"]:
-        zone_identifier, record_identifier, record_ip = get_identifiers(config, record_type, record_name)
+        zone_data = get_identifiers(config, record_type, record_name)
 
-        if current_ip_address != record_ip:
-            update_record(config, current_ip_address, record_type, zone_identifier, record_identifier, record_name)
+        if current_ip_address != zone_data.get("record_ip"):
+            update_record(config, current_ip_address, record_type, record_name, zone_data)
             write_ip(current_ip_address, ip_version)
         elif args.force:
             logging.warning(f'Force parameter is set. Forcing IP address "{current_ip_address}" update for record "{record_name}" even though it matches current record IP.')
-            update_record(config, current_ip_address, record_type, zone_identifier, record_identifier, record_name)
+            update_record(config, current_ip_address, record_type, record_name, zone_data)
             write_ip(current_ip_address, ip_version)
         else:
             logging.info(f'IPv{ip_version} address "{current_ip_address}" already matches DNS record "{record_name}". Skipping...')
@@ -217,6 +245,7 @@ def main(ip_version, record_type, args):
         check_config(config, args.config)
         handleZone(current_ip_address, ip_version, record_type, config, args)
     
+
 
 if __name__ == '__main__':
     args = setup_parser()
